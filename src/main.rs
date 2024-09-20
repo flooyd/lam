@@ -41,6 +41,9 @@ struct Player {
     pose_interp_factor: f32,
     hair_lines: Vec<((f32, f32), (f32, f32))>,
     is_local: bool,
+    is_moving: bool,     // Tracks if the player is currently moving
+    bobbing_time: f32,   // Time accumulator for bobbing
+    bobbing_offset: f32, // Current y-offset for bobbing
 }
 
 impl Player {
@@ -65,6 +68,9 @@ impl Player {
             pose_interp_factor: 0.0,
             hair_lines: Vec::new(),
             is_local: true,
+            is_moving: false,
+            bobbing_time: 0.0,
+            bobbing_offset: 0.0,
         };
         player.generate_hair();
         player
@@ -91,6 +97,9 @@ impl Player {
             pose_interp_factor: 0.0,
             hair_lines: Vec::new(),
             is_local: false,
+            is_moving: false,
+            bobbing_time: 0.0,
+            bobbing_offset: 0.0,
         };
         player.generate_hair();
         player
@@ -105,8 +114,7 @@ impl Player {
 
         for _ in 0..hair_count {
             let angle = rng.gen_range(-180.0_f32.to_radians()..180.0_f32.to_radians());
-            let angle_variation =
-                rng.gen_range(-5.0_f32.to_radians()..5.0_f32.to_radians());
+            let angle_variation = rng.gen_range(-5.0_f32.to_radians()..5.0_f32.to_radians());
 
             let start_x = 15.0 * angle.cos();
             let start_y = -30.0 + rng.gen_range(0.0..10.0);
@@ -135,10 +143,12 @@ impl Player {
                 self.y = target_y;
                 self.target_x = None;
                 self.target_y = None;
+                self.is_moving = false;
             } else {
                 let direction = direction.normalize();
                 self.x += direction.x * self.speed * dt;
                 self.y += direction.y * self.speed * dt;
+                self.is_moving = true;
             }
             self.position_changed = true;
         }
@@ -151,36 +161,53 @@ impl Player {
 
         // Update pose
         let now = Instant::now();
-        if now.duration_since(self.last_pose_update_time) >= self.pose_update_interval {
-            self.current_pose_index = self.next_pose_index;
-            self.next_pose_index = (self.next_pose_index + 1) % RUN_POSES.len();
-            self.pose_interp_factor = 0.0;
-            self.last_pose_update_time = now;
-        } else {
-            self.pose_interp_factor +=
-                1.0 / (self.pose_update_interval.as_secs_f32() * get_fps() as f32); // Assuming 60 FPS
-            if self.pose_interp_factor > 1.0 {
-                self.pose_interp_factor = 1.0;
+        if self.is_moving {
+            if now.duration_since(self.last_pose_update_time) >= self.pose_update_interval {
+                self.current_pose_index = self.next_pose_index;
+                self.next_pose_index = (self.next_pose_index + 1) % RUN_POSES.len();
+                self.pose_interp_factor = 0.0;
+                self.last_pose_update_time = now;
+            } else {
+                self.pose_interp_factor +=
+                    1.0 / (self.pose_update_interval.as_secs_f32() * get_fps() as f32); // Assuming 60 FPS
+                if self.pose_interp_factor > 1.0 {
+                    self.pose_interp_factor = 1.0;
+                }
             }
+
+            // Update bobbing when moving
+            self.bobbing_time += dt * 1.0; // Adjust speed as needed
+            self.bobbing_offset = (self.bobbing_time * 5.0).sin() * 5.0; // amplitude of 5.0
+        } else {
+            // Reset bobbing when not moving
+            self.bobbing_time = 0.0;
+            self.bobbing_offset = 0.0;
         }
     }
 
     fn get_current_pose(&self) -> Pose {
-        let start_pose = &RUN_POSES[self.current_pose_index];
-        let end_pose = &RUN_POSES[self.next_pose_index];
-        lerp_pose(start_pose, end_pose, self.pose_interp_factor)
+        if self.is_moving {
+            let start_pose = &RUN_POSES[self.current_pose_index];
+            let end_pose = &RUN_POSES[self.next_pose_index];
+            lerp_pose(start_pose, end_pose, self.pose_interp_factor)
+        } else {
+            IDLE_POSE
+        }
     }
 
     fn draw(&self) {
+        // Apply bobbing offset
+        let y_offset = self.bobbing_offset;
+
         // Draw hair
         for line in &self.hair_lines {
             draw_line(
-                self.x + line.0 .0, // Start x (translated)
-                self.y + line.0 .1, // Start y (translated)
-                self.x + line.1 .0, // End x (translated)
-                self.y + line.1 .1, // End y (translated)
-                1.0,                // Thickness of hair strands
-                BLACK,              // Color of hair
+                self.x + line.0 .0,            // Start x (translated)
+                self.y + line.0 .1 + y_offset, // Start y (translated with bobbing)
+                self.x + line.1 .0,            // End x (translated)
+                self.y + line.1 .1 + y_offset, // End y (translated with bobbing)
+                1.0,                           // Thickness of hair strands
+                BROWN,                         // Color of hair
             );
         }
 
@@ -188,34 +215,41 @@ impl Player {
         let body_color = if self.is_local { RED } else { BLACK };
 
         // Draw head
-        draw_circle(self.x, self.y, 20.0, body_color);
+        draw_circle(self.x, self.y + y_offset, 20.0, body_color);
 
         // Draw eyes
         let eye_color = WHITE;
-        draw_circle(self.x - 7.0, self.y - 5.0, 3.0, eye_color);
-        draw_circle(self.x + 7.0, self.y - 5.0, 3.0, eye_color);
+        draw_circle(self.x - 7.0, self.y - 5.0 + y_offset, 3.0, eye_color);
+        draw_circle(self.x + 7.0, self.y - 5.0 + y_offset, 3.0, eye_color);
 
         // Draw mouth
         let mouth_color = WHITE;
         draw_line(
             self.x - 7.0,
-            self.y + 5.0,
+            self.y + 5.0 + y_offset,
             self.x,
-            self.y + 10.0,
+            self.y + 10.0 + y_offset,
             2.0,
             mouth_color,
         );
         draw_line(
             self.x,
-            self.y + 10.0,
+            self.y + 10.0 + y_offset,
             self.x + 7.0,
-            self.y + 5.0,
+            self.y + 5.0 + y_offset,
             2.0,
             mouth_color,
         );
 
         // Draw body
-        draw_line(self.x, self.y + 10.0, self.x, self.y + 40.0, 2.0, body_color);
+        draw_line(
+            self.x,
+            self.y + 10.0 + y_offset,
+            self.x,
+            self.y + 40.0 + y_offset,
+            2.0,
+            body_color,
+        );
 
         // Get interpolated pose
         let pose = self.get_current_pose();
@@ -223,17 +257,17 @@ impl Player {
         // Draw arms
         draw_line(
             self.x,
-            self.y + 20.0,
+            self.y + 20.0 + y_offset,
             self.x + pose.left_arm.0,
-            self.y + pose.left_arm.1,
+            self.y + pose.left_arm.1 + y_offset,
             2.0,
             body_color,
         );
         draw_line(
             self.x,
-            self.y + 20.0,
+            self.y + 20.0 + y_offset,
             self.x + pose.right_arm.0,
-            self.y + pose.right_arm.1,
+            self.y + pose.right_arm.1 + y_offset,
             2.0,
             body_color,
         );
@@ -241,17 +275,17 @@ impl Player {
         // Draw legs
         draw_line(
             self.x,
-            self.y + 40.0,
+            self.y + 40.0 + y_offset,
             self.x + pose.left_leg.0,
-            self.y + pose.left_leg.1,
+            self.y + pose.left_leg.1 + y_offset,
             2.0,
             body_color,
         );
         draw_line(
             self.x,
-            self.y + 40.0,
+            self.y + 40.0 + y_offset,
             self.x + pose.right_leg.0,
-            self.y + pose.right_leg.1,
+            self.y + pose.right_leg.1 + y_offset,
             2.0,
             body_color,
         );
@@ -261,12 +295,18 @@ impl Player {
             // Draw black rectangle centered above player
             draw_rectangle(
                 self.x - 75.0,
-                self.y - 70.0,
+                self.y - 70.0 + y_offset,
                 150.0,
                 50.0,
                 Color::new(0.0, 0.0, 0.0, 0.8),
             );
-            draw_text(message, self.x - 50.0, self.y - 35.0, 20.0, WHITE);
+            draw_text(
+                message,
+                self.x - 50.0,
+                self.y - 35.0 + y_offset,
+                20.0,
+                WHITE,
+            );
         }
     }
 }
@@ -386,17 +426,6 @@ impl Game {
             direction.x += 1.0;
         }
 
-        if direction != Vec2::ZERO {
-            direction = direction.normalize();
-            self.local_player.x += direction.x * self.local_player.speed * dt;
-            self.local_player.y += direction.y * self.local_player.speed * dt;
-            self.local_player.position_changed = true;
-
-            // Clamp to screen
-            self.local_player.x = self.local_player.x.clamp(0.0, 800.0 - self.local_player.width);
-            self.local_player.y = self.local_player.y.clamp(0.0, 600.0 - self.local_player.height);
-        }
-
         if is_key_pressed(KeyCode::Space) {
             let message = "Hello, world!".to_string();
             self.local_player.message = Some(message.clone());
@@ -415,13 +444,36 @@ impl Game {
             self.local_player.message_sent = false;
         }
 
-        if is_mouse_button_down(MouseButton::Right) { // Changed from is_mouse_button_down
+        // Determine if the player is moving via WASD
+        let mut is_moving = false;
+        if direction != Vec2::ZERO {
+            direction = direction.normalize();
+            self.local_player.x += direction.x * self.local_player.speed * dt;
+            self.local_player.y += direction.y * self.local_player.speed * dt;
+            self.local_player.position_changed = true;
+            is_moving = true;
+
+            // Clamp to screen
+            self.local_player.x = self
+                .local_player
+                .x
+                .clamp(0.0, 800.0 - self.local_player.width);
+            self.local_player.y = self
+                .local_player
+                .y
+                .clamp(0.0, 600.0 - self.local_player.height);
+        }
+
+        if is_mouse_button_pressed(MouseButton::Right) {
+            // Changed from is_mouse_button_down
             let mouse_pos = mouse_position();
             self.local_player.target_x = Some(mouse_pos.0);
             self.local_player.target_y = Some(mouse_pos.1);
+            is_moving = true;
         }
 
-        // Removed direct movement towards target from handle_input
+        // Determine if the player is moving based on input or target position
+        self.local_player.is_moving = is_moving || self.local_player.target_x.is_some();
     }
 
     fn draw(&self) {
@@ -443,7 +495,15 @@ impl Game {
     }
 }
 
-// Window configuration
+// Idle pose definition
+const IDLE_POSE: Pose = Pose {
+    left_arm: (-20.0, 30.0),
+    right_arm: (20.0, 30.0),
+    left_leg: (-10.0, 60.0),
+    right_leg: (10.0, 60.0),
+};
+
+//window conf
 fn window_conf() -> Conf {
     Conf {
         window_title: "Smooth Multiplayer Game".to_owned(),
@@ -458,12 +518,12 @@ fn window_conf() -> Conf {
 async fn main() {
     // Define the target frame rate and frame duration
     const TARGET_FPS: u32 = 60;
-    const TARGET_FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / TARGET_FPS as u64);
+    const TARGET_FRAME_DURATION: Duration = Duration::from_millis(1000 / TARGET_FPS as u64);
 
     let rt = Runtime::new().unwrap();
 
     let (handler, listener) = node::split::<()>();
-    let server_addr = "127.0.0.1:3042";
+    let server_addr = "40.124.89.57:3042";
 
     let (server_endpoint, _) = handler
         .network()
